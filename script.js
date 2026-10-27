@@ -1,7 +1,12 @@
 (() => {
   "use strict";
 
-  const API_BASE = "https://mental-health-score-predictor-1-94pg.onrender.com";
+  // Local backend (uvicorn main:app --reload) vs. deployed backend on Render.
+  const LOCAL_API = "http://127.0.0.1:8000";
+  const PROD_API = "https://mental-health-score-predictor-1-94pg.onrender.com";
+  const host = window.location.hostname;
+  const IS_LOCAL = host === "" || host === "localhost" || host === "127.0.0.1"; // "" = opened as file://
+  const API_BASE = IS_LOCAL ? LOCAL_API : PROD_API;
 
   const form = document.getElementById("predict-form");
   const submitBtn = document.getElementById("submit-btn");
@@ -17,8 +22,22 @@
   const scoreBandEl = document.getElementById("score-band");
   const scoreContextEl = document.getElementById("score-context");
   const gaugeFill = document.getElementById("gauge-fill");
-  const errorLabelEl = document.getElementById("error-label");
   const errorCopyEl = document.getElementById("error-copy");
+  const loadingCopyEl = document.querySelector(".loading-copy");
+
+  // index.html has no #error-label element, which used to crash renderError().
+  // Create it on the fly if it is missing so error states always render.
+  let errorLabelEl = document.getElementById("error-label");
+  if (!errorLabelEl && errorCopyEl) {
+    errorLabelEl = document.createElement("p");
+    errorLabelEl.id = "error-label";
+    errorLabelEl.className = "error-label";
+    errorCopyEl.parentNode.insertBefore(errorLabelEl, errorCopyEl);
+  }
+
+  const REQUEST_TIMEOUT_MS = 90000; // Render free tier can take ~60s to wake up
+  const SLOW_HINT_AFTER_MS = 6000;
+  const LOADING_COPY_DEFAULT = loadingCopyEl ? loadingCopyEl.textContent : "";
 
   const GAUGE_ARC_LENGTH = 314; // approx pi * r(100)
 
@@ -201,7 +220,7 @@
   }
 
   function renderError(label, copy) {
-    errorLabelEl.textContent = label;
+    if (errorLabelEl) errorLabelEl.textContent = label;
     errorCopyEl.textContent = copy;
     showState("error");
   }
@@ -243,12 +262,24 @@
 
     setSubmitting(true);
     showState("loading");
+    if (loadingCopyEl) loadingCopyEl.textContent = LOADING_COPY_DEFAULT;
+
+    // Free-tier hosting sleeps when idle: tell the user why it may take a while.
+    const slowHintTimer = setTimeout(() => {
+      if (loadingCopyEl && !IS_LOCAL) {
+        loadingCopyEl.textContent =
+          "The server may be waking up after being idle. This can take up to a minute.";
+      }
+    }, SLOW_HINT_AFTER_MS);
+    const controller = new AbortController();
+    const timeoutTimer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
     try {
       const res = await fetch(`${API_BASE}/predict`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
+        signal: controller.signal,
       });
 
       if (res.status === 422) {
@@ -279,11 +310,23 @@
 
       renderResult(data.predicted_mental_health_score);
     } catch (err) {
-      renderError(
-        "Can't reach the server",
-        `Couldn't connect to ${API_BASE}. Make sure the backend is running (uvicorn main:app --port 2200 --reload) and reachable from this page.`
-      );
+      if (err && err.name === "AbortError") {
+        renderError(
+          "Request timed out",
+          "The server took too long to respond. It may still be starting up, so please try again in a moment."
+        );
+      } else {
+        renderError(
+          "Can't reach the server",
+          IS_LOCAL
+            ? `Couldn't connect to ${LOCAL_API}. Make sure the backend is running (uvicorn main:app --reload) and try again.`
+            : "We couldn't connect to the prediction service. Check your internet connection and try again shortly."
+        );
+      }
     } finally {
+      clearTimeout(slowHintTimer);
+      clearTimeout(timeoutTimer);
+      if (loadingCopyEl) loadingCopyEl.textContent = LOADING_COPY_DEFAULT;
       setSubmitting(false);
     }
   });
